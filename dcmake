@@ -1,0 +1,102 @@
+#!/bin/bash
+
+x_change() {
+  let x=x+1
+}
+
+get_port() {
+  read -p "Port range to use: " PRT
+  LAST_PORT="$(freeport $PRT | sed -n ${x}p)"
+   if [ -z "${LAST_PORT}" ]; then
+          echo "$PRT"00
+    else
+          echo "$((${LAST_PORT}))"
+    fi
+}
+
+add_proj() {
+  case $(hostname -s) in
+        dkr-host-stg01) cd "/opt/docker" ;;
+        z3r0) cd "$HOME/Work/devops/docker-site" ;;
+  esac
+  mkdir $1
+  cd $1
+  add_repo
+  add_config
+}
+
+add_config() {
+  add_compose >> docker-compose.yml
+
+  if [[ "${nginx}" == "true" ]]; then
+    mkdir -p config/nginx/vhost
+
+    read -p "domain name: " DN
+    read -p "list of subdomain, ex: api admin repayment: " servername
+    for sn in $servername
+    do
+      add_sn $sn $DN > config/nginx/vhost/$sn.conf
+    done
+    add_nginx >> docker-compose.yml
+  fi
+
+  if [[ "${php}" == "true" ]]; then
+    mkdir -p config/php/zend_tmp
+    add_php >> docker-compose.yml
+  fi
+
+  if [[ "${nodejs}" == "true" ]]; then
+     read -p "Node require port?(y/n) :" nodePort
+     if [[ "$nodePort" == "y"  ]] ;then
+        x_change
+        add_node1 >> docker-compose.yml
+     else
+        add_node >> docker-compose.yml
+     fi
+  fi
+
+  if [[ "${redis}" == "true" ]]; then
+    add_redis >> docker-compose.yml
+  fi
+}
+
+add_repo() {
+  pwd
+  mkdir repo
+  read -p "how many repo: " repocount
+  declare -a repo
+  for i in $(seq 1 $repocount); do
+    read -p "insert repo: " repo
+    repo[$i]=$repo
+    if [ $i == "$repocount" ]; then
+      for z in $(seq 1 $repocount); do
+        git clone https://$GH_TOKEN@github.com/<orgsName>/"${repo[$z]}" repo/"${repo[$z]}"
+        #RETCODE=$?
+        #  if [ ! $RETCODE -eq 0 ]; then
+        #     echo "Failed cloning repo"
+        #     exit 1
+        #  fi
+      done
+    fi
+  done
+
+}
+
+read -p "project name: " PRJ
+read -p "add services [php,nginx,redis,nodejs]: " SRV
+
+#read -p "add php: " PHP
+x=1
+
+. ./lib/resource
+
+if [ -n "$PRJ" ]; then
+  for sv in $SRV; do
+    if [ -n "$sv" ];then
+        declare $sv=true
+    fi
+  done
+
+  add_proj $PRJ
+  add_net >> docker-compose.yml
+fi

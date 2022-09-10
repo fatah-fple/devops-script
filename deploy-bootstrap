@@ -1,0 +1,150 @@
+#!/bin/bash
+
+host=$(hostname)
+sudoer_add () {
+for user in "sysops" "salt";
+do
+  if useradd -m $user > /dev/null; then
+cat << EOF > $user
+$user ALL=(ALL) NOPASSWD: ALL
+EOF
+  fi
+done
+salt_auth="/home/salt/.ssh/authorized_keys"
+if [ ! -f "$salt_auth" ]; then
+  echo '<ssh-pub>' > "$salt_auth"
+fi
+}
+
+github_id () {
+ssh -o StrictHostKeyChecking=accept-new -T git@github.com >/dev/null
+if [ $? -gt 1  ];then
+  cat << GITCONFIG > /root/.ssh/config
+Host github.com
+        User git
+        IdentityFile /root/.ssh/github_id
+        StrictHostKeyChecking no
+GITCONFIG
+
+  read -p "Enter the github_id private key: "$'\n' key
+  echo "$key" > /root/.ssh/github_id
+  chmod 400 /root/.ssh/github_id
+fi 
+}
+
+zabbix_conf () {
+besor=$(echo $host | tr '[:lower:]' '[:upper:]')
+cat << CONF > zabbix_agent2.conf
+PidFile=/var/run/zabbix/zabbix_agent2.pid
+LogFile=/var/log/zabbix/zabbix_agent2.log
+LogFileSize=0
+Server=127.0.0.1
+ServerActive=
+Hostname=${host}-prod
+Include=/etc/zabbix/zabbix_agent2.d/*.conf
+ControlSocket=/tmp/agent.sock
+TLSConnect=psk
+TLSAccept=psk
+TLSPSKIdentity=PSK_${besor}
+TLSPSKFile=$(openssl rand -hex 32 | tee zabbix_agentd.psk)
+DenyKey=system.run[*]
+CONF
+
+echo "Host Name: $host"
+echo "PSK Identity: ${host}"
+echo "PSK : `cat zabbix_agentd.psk`"
+}
+
+cp_dep () {
+    TELEPORT_SVC=`systemctl show -p FragmentPath teleport.service | awk -F\= '{print $2}'`
+    cp $TELEPORT_SVC /tmp/teleport.service
+}
+
+reload_dep () {
+    cp -f /tmp/teleport.service $TELEPORT_SVC
+    systemctl daemon-reload
+    systemctl restart teleport
+}
+
+create_tp () {
+tp_file="/etc/teleport.yaml"
+cat << TP > $tp_file
+teleport:
+  nodename: $host
+  auth_token: $1
+  ca_pin:
+  - sha256:
+  auth_servers:
+  - HOST.FQDN:443
+  log:
+    output: stderr
+    severity: INFO
+auth_service:
+  enabled: no
+ssh_service:
+  enabled: yes
+  labels:
+    env: prod
+    project: $(echo $host | cut -d '-' -f1)
+  commands:
+  - name: version
+    command: ["/bin/sh", "-c", "/usr/local/bin/teleport version | cut -d ' ' -f 2"]
+    period: 1h0m0s
+proxy_service:
+  enabled: no
+TP
+}
+
+teleport_add () {
+OS="$(cat /etc/os-release | grep "^ID=" | cut -d '=' -f2 | sed 's/"//g')"
+
+crontab -l | grep teleport-upgrade >/dev/null || crontab -l | echo "0 2 * * * /root/teleport-upgrade >> /tmp/teleport-upgrade.log" | crontab -
+
+    if [[ $OS == "centos" ]] || [[ $OS == "amzn" ]]; then
+        yum list installed | grep teleport || {
+          read -p "insert new node token: " token
+          sudo bash -c "$(curl -fsSL https://$HOST/scripts/$token/install-node.sh)"
+          create_tp $token
+          systemctl restart teleport
+        }
+        if [ ! -f  "/etc/yum.repos.d/teleport.repo" ]; then
+            yum-config-manager --add-repo https://rpm.releases.teleport.dev/teleport.repo
+        fi
+        yum list updates | grep teleport > /dev/null
+        if [[ $? == "0" ]]; then
+            cp_dep
+            yum -y update teleport
+            reload_dep
+        fi
+    elif [[ $OS == "ubuntu" ]] || [[ $OS == "debian" ]]; then
+        repo_file="/etc/apt/sources.list.d/teleport.list"
+        if [ ! -f  "$repo_file" ]; then
+            echo "deb [signed-by=/usr/share/keyrings/teleport-archive-keyring.asc] https://deb.releases.teleport.dev/ stable main" | tee "$repo_file" > /dev/null
+        fi
+        apt list --upgradeable | grep teleport
+        if [[ $? == "0" ]]; then
+            cp_dep
+            apt-get --only-upgrade install teleport
+            reload_dep
+        fi
+    else
+            echo "`date +%Y-%m-%d` - Not upgrading teleport (`teleport version | awk '{print $1" " $2}'`)"
+    fi
+}
+
+echo "Teleport init"
+teleport_add > /dev/null || {
+  echo "failed to add teleport"
+}
+echo "Adding Sudoers"
+sudoer_add > /dev/null || {
+  echo "failed to set sudoers"
+}
+echo "Setting Up github ssh"
+github_id > /dev/null || {
+  echo "failed to set github ssh"
+}
+echo "zabbix init"
+zabbix_conf > /dev/null || {
+  echo "failed to set zabbix"
+}

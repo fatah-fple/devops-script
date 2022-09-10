@@ -1,0 +1,47 @@
+#!/bin/bash
+set -x
+
+## Variables
+SC="!A-Za-z0-9"
+RP="$(</dev/urandom tr -dc $SC | head -c 30)"
+APP_NAME="<[PROJECT_NAME]>"
+APP_DIR="/home/$USER/$APP_NAME"
+
+DB_APP_USER="${APP_NAME}_app"
+DB_DEV_USER="${APP_NAME}_dev"
+DB_NAME="$APP_NAME"
+DKR_IP="[REDACTED]"
+VPN_IP="[REDACTED]"
+
+## Generate password
+#for i in 1..2; do
+#	RP_$i="$(</dev/urandom tr -dc $SC | head -c 25)"
+#	echo $RP[$i]
+#done
+
+RP_1="$(</dev/urandom tr -dc $SC | head -c 25)"
+RP_2="$(</dev/urandom tr -dc $SC | head -c 25)"
+
+## Write password in .env
+#echo "$RP"
+echo -e "DB_NAME=$APP_NAME\n\n \
+	USERNAME=$DB_APP_USER\nPASSWORD'"$RP_1"' \n\n \
+	USERNAME="$DB_DEV_USER"\nPASSWORD='"$RP_2"'" > $APP_DIR/.env
+
+## EOF
+cat << LOL >query.sql
+CREATE DATABASE $DB_NAME;  
+SHOW DATABASES; 
+CREATE USER 
+'$DB_APP_USER'@'$DKR_IP' IDENTIFIED BY '$RP_1', 
+'$DB_DEV_USER'@'$VPN_IP' IDENTIFIED BY '$RP_2'; 
+GRANT SELECT, INSERT, UPDATE, DELETE ON $DB_NAME.* TO $DB_APP_USER@$DKR_IP; 
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO $DB_DEV_USER@$VPN_IP; 
+FLUSH PRIVILEGES; 
+SHOW GRANTS FOR '$DB_APP_USER'@'$DKR_IP'; 
+SHOW GRANTS FOR '$DB_DEV_USER'@'$VPN_IP';
+LOL
+
+docker exec -i <[CONTAINER_ID]> mysql -uroot -p"$(cat PASS.txt)" < query.sql 
+
+set +x

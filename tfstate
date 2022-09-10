@@ -1,0 +1,149 @@
+#!/bin/bash
+
+TFHOME="$HOME/.terraform-state"
+STATE="terraform.tfstate" 
+PROJ="$1"
+PEM="$PROJ-prod.pem"
+
+
+sync() {
+    read -p "AWS profile to sync the s3 remote state: " PRF
+    if
+        if [[ $PRF == "china" ]]; then
+          aws s3 sync --region cn-north-1 --profile $PRF s3://$MAINBUCKET "$TFHOME" > /dev/null
+        else
+          aws s3 sync --profile $PRF s3://$MAINBUCKET "$TFHOME" > /dev/null
+        fi
+    fi
+}
+
+init_check() {
+    [[ "$(command -v jq)" ]] || { echo "jq is not installed" 1>&2 ; exit 1; }
+    [[ "$(command -v fzf)" ]] || { echo "fzf is not installed" 1>&2 ; exit 1; }
+    [[ "$(command -v aws)" ]] || { echo "aws is not installed" 1>&2 ; exit 1; }
+
+    if [ ! -d "$TFHOME" ]; then
+      mkdir "$TFHOME"
+      read -p "No project found, aws profile to sync the s3 remote state: "
+      sync
+    fi
+}
+
+get_res() {
+    cat $STATE| jq -r ".resources[]|select(.name==\"$res\")|.instances[].attributes|$1"
+    
+}
+
+ssh_conf() {
+  if [[ ! get_eip -eq 0 ]]; then
+    echo "Host $(get_eip|jq -r '.EIP')" #>> ~/.ssh/config
+  else
+    for host in $(get_ec2|jq -r '.IP.Public');do 
+      echo "Host $PROJ"
+      echo "  HostName $host"
+      echo "  User ec2-user"
+      echo "  IdentityFile $TFHOME/$PROJ/$PEM"
+      echo "  StrictHostKeyChecking no"
+    done
+  fi
+}
+
+get_pem() {
+    if [[ ! -d "$HOME/.ssh/config.d" ]]; then
+      TFSSH="$HOME/.ssh/config"
+    else
+      TFSSH="$HOME/.ssh/config.d/tf-ssh"
+    fi
+    if [ ! -f "$PEM" ]; then
+        local res=priv_key
+        get_res '.private_key_pem' > "$PEM"
+        chmod 400 "$PEM"
+        ssh_conf >> $TFSSH
+    else
+        cat "$PEM"
+    fi
+}
+
+get_rds() {
+    local res=db_1
+    #get_res| jq -r 
+    get_res "{Host: .address, Engine: .engine, Ver: .engine_version, type: .instance_class, AZ: .availability_zone, User: .username, Pass: .password}"
+}
+
+get_ec2() {
+    local res=ec2_web
+    get_res "{IP: {Public: .public_ip, Private: .private_ip}, ID: .id, Class: .instance_type, State: .instance_state}"
+    get_eip
+}
+
+get_eip() {
+    local res=eip
+    get_res "{EIP: .public_ip}"
+}
+
+get_redis() {
+    local res=redis
+    get_res "{Host: .primary_endpoint_address, Class: .node_type, Engine: .engine, Ver: .engine_version}"
+}
+
+list_proj() {
+    ls "$TFHOME" | fzf --preview "($(basename $BASH_SOURCE) {} all)"
+}
+
+do_ssh() {
+    pub_ip=`get_ec2|jq -r '.IP.Public'`
+    if [ ! -f "$PEM" ]; then
+        get_pem
+    fi
+    host="$pub_ip -i $PEM"
+    ssh ec2-user@$host  || ssh centos@$host || ssh ubuntu@$host
+}
+
+main() {
+
+if [ -z "$*" ]; then
+    echo "Usage: $0 <projectdir> [pem,ec2,ssh,rds,ecs,all]" 
+    exit
+fi
+case "$1" in
+    list) list_proj
+    exit;;
+    sync) sync
+    exit;;
+esac
+
+
+cd $TFHOME/$PROJ 2>/dev/null
+if [ ! -f "$STATE" ]; then
+    echo "this project doesn't have any state or doesn't exist"
+    exit
+fi
+case "$2" in
+
+    pem) get_pem;;
+
+    ssh) do_ssh;;
+
+    rds) get_rds;;
+
+    ec2) get_ec2;;
+
+    sshconf) ssh_conf;;
+
+    redis) get_redis;;
+
+    all)
+    echo "PEM"
+    get_pem
+    echo "EC2"
+    get_ec2
+    echo "RDS"
+    get_rds
+    echo "REDIS"
+    get_redis;;
+
+esac
+}
+
+init_check
+main $*
